@@ -1,7 +1,7 @@
 "use client"; // This is a client component 👈🏽
 import React, { useEffect, useRef, useState } from "react";
 import { createEditor, createWorkspaceOptions } from "./utils";
-import { __unstableSchemas, AffineSchemas } from "@blocksuite/blocks/models";
+import { __unstableSchemas, AffineSchemas, TableBlockModel, DatabaseBlockModel, edgelessPreset, pagePreset } from "@blocksuite/blocks/models";
 import { useMount, useUpdate, useUpdateEffect } from "ahooks";
 import type { Page } from "@blocksuite/store";
 import { Text, Workspace } from "@blocksuite/store";
@@ -17,9 +17,11 @@ export interface IEditorProps {
 
 const options = createWorkspaceOptions();
 const pageId = "step-article-page";
+
 const Editor: React.FC<IEditorProps> = (props) => {
   const { className } = props;
 
+  const [isEdgelessMode, setIsEdgelessMode] = useState<boolean>(false);
   const [displayMarkdown, setDisplayMarkdown] = useState("");
   const [isMenuOpen, setIsMenuOpen] = useState<boolean>(false);
   const [canEditor, setCanEditor] = useState<boolean>(false);
@@ -66,64 +68,113 @@ const Editor: React.FC<IEditorProps> = (props) => {
   const pageBlockIdRef = useRef<string>("");
   const contentParserRef = useRef<ContentParser>(null!);
   const [frameId, setFrameId] = useState<string>("");
+  const editorRef = useRef<any>(null); // To store the editor instance
 
-  // 初始化workspace、page
+  // Initialize workspace and page
   useMount(() => {
-    if (
-      ref.current &&
-      !workspaceRef.current &&
-      !pageRef.current &&
-      !pageBlockIdRef.current
-    ) {
-      const workspace = new Workspace(options)
-        .register(AffineSchemas)
-        .register(__unstableSchemas);
-      const page = workspace.createPage({ id: pageId });
-      const contentParser = new ContentParser(page);
-      createEditor(page, ref.current);
-      pageRef.current = page;
-      workspaceRef.current = workspace;
-
-      contentParserRef.current = contentParser;
-    }
+    const workspace = new Workspace(options)
+      .register(AffineSchemas)
+      .register(__unstableSchemas)
+      .register(TableBlockModel)
+      .register(DatabaseBlockModel);
+    console.log("AffineSchemas:", AffineSchemas);
+    console.log("__unstableSchemas:", __unstableSchemas);
+    const page = workspace.createPage({ id: pageId });
+    pageRef.current = page;
+    workspaceRef.current = workspace;
+    contentParserRef.current = new ContentParser(page);
   });
 
+  // Create or update editor when mode changes
   useEffect(() => {
-    if (!pageRef.current) {
+    if (ref.current && pageRef.current && workspaceRef.current) {
+      if (editorRef.current) {
+        // Clear previous editor if any
+        editorRef.current.remove(); // More robust cleanup
+        ref.current.innerHTML = '';
+      }
+      const editor = createEditor(pageRef.current, ref.current);
+      editor.mode = isEdgelessMode ? 'edgeless' : 'page';
+      editorRef.current = editor;
+
+      // For edgeless mode, we might need to ensure the page has a surface block
+      if (isEdgelessMode) {
+        const page = pageRef.current;
+        if (!page.root) { // Should not happen if page is created correctly
+          console.error("Page root is null in edgeless mode initialization");
+          return;
+        }
+        // Check if a surface block exists, if not, add one.
+        // This depends on how @blocksuite/editor handles edgeless mode initialization.
+        // For now, we assume EditorContainer's mode='edgeless' handles this.
+        // If not, one might do:
+        // if (page.root.children.length === 0) {
+        //   page.addBlock('affine:surface', {});
+        // }
+      }
+    }
+  }, [isEdgelessMode]);
+
+
+  useEffect(() => {
+    if (!pageRef.current || !editorRef.current || isEdgelessMode) { // Skip if edgeless or editor not ready
       return;
     }
-    if (!pageBlockIdRef.current) {
+    // Only add initial blocks if not in edgeless mode and no blocks exist
+    if (!pageBlockIdRef.current && pageRef.current.root?.children.length === 0) {
       const _pageBlockId = pageRef.current.addBlock("affine:page", {
         title: new Text("Introduction Note AI"),
       });
       pageBlockIdRef.current = _pageBlockId;
     }
-  }, []);
+  }, [isEdgelessMode, editorRef.current]);
+
 
   useUpdateEffect(() => {
     const page = pageRef.current;
-    if (!page) {
+    if (!page || !contentParserRef.current || !editorRef.current) {
       return;
     }
+
+    if (isEdgelessMode) {
+      // In edgeless mode, clear the page content if switching from page mode
+      // or ensure it's blank. The editor.mode='edgeless' should handle the surface.
+      const root = page.root;
+      if (root) {
+        const blocks = root.children;
+        blocks.forEach(block => page.deleteBlock(block));
+      }
+      page.resetHistory();
+      pageBlockIdRef.current = ""; // Reset page block ref for edgeless
+      return;
+    }
+
+    // Page mode specific logic for importing markdown
     const root = page.root;
     if (root) {
       const blocks = root.children;
       console.log(blocks);
       if (blocks.length) {
         blocks.forEach((item) => {
-          page.deleteBlock(item);
+          // Avoid deleting the affine:page block if it's the main one
+          if(item.flavour !== 'affine:page' || item.id !== pageBlockIdRef.current) {
+            page.deleteBlock(item);
+          }
         });
       }
     }
     page.resetHistory();
 
-    const frameId = pageRef.current.addBlock(
-      "affine:frame",
-      {},
-      pageBlockIdRef.current
-    );
-    contentParserRef.current.importMarkdown(displayMarkdown, frameId);
-  }, [displayMarkdown]);
+    if (pageBlockIdRef.current) { // Ensure pageBlockId exists before adding frame
+        const frameId = pageRef.current.addBlock(
+            "affine:frame",
+            {},
+            pageBlockIdRef.current
+        );
+        contentParserRef.current.importMarkdown(displayMarkdown, frameId);
+    }
+  }, [displayMarkdown, isEdgelessMode]);
+
 
   const onChangeTitle = () => {
     if (pageBlockIdRef.current) {
@@ -222,11 +273,71 @@ const Editor: React.FC<IEditorProps> = (props) => {
     const prompt = promptRef.current?.value || "";
     complete(prompt);
   };
-  const downloadMarkdown = () => {
-    // contentParserRef.current;
-    // debugger;
-    // contentParserRef.current.exportMarkdown();
-    // contentParserRef.current.exportHtml();
+  const downloadMarkdown = async () => {
+    if (contentParserRef.current && pageRef.current) {
+      try {
+        const markdownContent = await contentParserRef.current.exportMarkdown();
+        const blob = new Blob([markdownContent], { type: "text/markdown" });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = "note.md";
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+      } catch (error) {
+        console.error("Error exporting Markdown:", error);
+        alert("Error exporting Markdown. See console for details.");
+      }
+    } else {
+      alert("Editor content not available for export.");
+    }
+  };
+
+  const downloadHtml = async () => {
+    if (contentParserRef.current && pageRef.current) {
+      try {
+        const htmlContent = await contentParserRef.current.exportHtml();
+        const blob = new Blob([htmlContent], { type: "text/html" });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = "note.html";
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+      } catch (error) {
+        console.error("Error exporting HTML:", error);
+        alert("Error exporting HTML. See console for details.");
+      }
+    } else {
+      alert("Editor content not available for export.");
+    }
+  };
+
+  const downloadSnapshot = async () => {
+    if (pageRef.current) {
+      try {
+        const snapshot = pageRef.current.snapToSnapshot();
+        const jsonContent = JSON.stringify(snapshot, null, 2);
+        const blob = new Blob([jsonContent], { type: "application/json" });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = "snapshot.json";
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+      } catch (error) {
+        console.error("Error exporting snapshot:", error);
+        alert("Error exporting snapshot. See console for details.");
+      }
+    } else {
+      alert("Page not available for snapshot export.");
+    }
   };
 
   return (
@@ -248,9 +359,17 @@ const Editor: React.FC<IEditorProps> = (props) => {
       </a>
 
       <button
+        onClick={() => setIsEdgelessMode(!isEdgelessMode)}
+        className="print:hidden fixed top-5 right-20 z-10 inline-flex items-center p-2 text-sm font-medium text-center text-gray-900 bg-white rounded-lg hover:bg-gray-100 focus:ring-4 focus:outline-none dark:text-white focus:ring-gray-50 dark:bg-gray-800 dark:hover:bg-gray-700 dark:focus:ring-gray-600"
+        type="button"
+      >
+        {isEdgelessMode ? "Page Mode" : "Edgeless Mode"}
+      </button>
+
+      <button
         id="dropdownMenuIconButton"
         onClick={toggleMenu}
-        className="print:hidden absolute top-5 right-5 z-10 inline-flex items-center p-2 text-sm font-medium text-center text-gray-900 bg-white rounded-lg hover:bg-gray-100 focus:ring-4 focus:outline-none dark:text-white focus:ring-gray-50 dark:bg-gray-800 dark:hover:bg-gray-700 dark:focus:ring-gray-600"
+        className="print:hidden fixed top-5 right-5 z-10 inline-flex items-center p-2 text-sm font-medium text-center text-gray-900 bg-white rounded-lg hover:bg-gray-100 focus:ring-4 focus:outline-none dark:text-white focus:ring-gray-50 dark:bg-gray-800 dark:hover:bg-gray-700 dark:focus:ring-gray-600"
         type="button"
       >
         <svg
@@ -269,7 +388,7 @@ const Editor: React.FC<IEditorProps> = (props) => {
         className={`
           ${
             isMenuOpen ? "" : "hidden"
-          } print:hidden absolute top-12 right-5 z-10 bg-white divide-y divide-gray-100 rounded-lg shadow w-44 dark:bg-gray-700 dark:divide-gray-600`}
+          } print:hidden fixed top-12 right-5 z-10 bg-white divide-y divide-gray-100 rounded-lg shadow w-44 dark:bg-gray-700 dark:divide-gray-600`}
       >
         <ul
           className="py-2 text-sm text-gray-700 dark:text-gray-200"
@@ -291,15 +410,30 @@ const Editor: React.FC<IEditorProps> = (props) => {
               Dark Mode
             </a>
           </li>
-
-          {/* <li>
+          <li>
             <a
               onClick={downloadMarkdown}
-              className="block px-4 py-2 hover:bg-gray-100 dark:hover:bg-gray-600 dark:hover:text-white"
+              className="block px-4 py-2 hover:bg-gray-100 dark:hover:bg-gray-600 dark:hover:text-white cursor-pointer"
             >
               Export Markdown
             </a>
-          </li> */}
+          </li>
+          <li>
+            <a
+              onClick={downloadHtml}
+              className="block px-4 py-2 hover:bg-gray-100 dark:hover:bg-gray-600 dark:hover:text-white cursor-pointer"
+            >
+              Export HTML
+            </a>
+          </li>
+          <li>
+            <a
+              onClick={downloadSnapshot}
+              className="block px-4 py-2 hover:bg-gray-100 dark:hover:bg-gray-600 dark:hover:text-white cursor-pointer"
+            >
+              Export Snapshot
+            </a>
+          </li>
           <li>
             <a
               onClick={exportPDF}
@@ -319,7 +453,7 @@ const Editor: React.FC<IEditorProps> = (props) => {
           </a>
         </div>
       </div>
-      <div className="p-2 absolute left-2 top-32">
+      <div className="p-2 absolute left-2 top-32 print:hidden">
         <textarea
           className="shadow-2xl h-40 w-full p-2"
           ref={promptRef}
@@ -339,8 +473,8 @@ const Editor: React.FC<IEditorProps> = (props) => {
           </div>
         )}
       </div>
-      <div className="relative min-h-[500px] w-full max-w-screen-lg border-stone-200 bg-white p-12 px-8 sm:mb-[calc(20vh)] sm:rounded-lg sm:border sm:px-12 sm:shadow-lg">
-        <div ref={ref} />
+      <div className={`relative min-h-[500px] w-full max-w-screen-lg border-stone-200 bg-white p-12 px-8 sm:mb-[calc(20vh)] sm:rounded-lg sm:border sm:px-12 sm:shadow-lg ${isEdgelessMode ? 'edgeless-container-active' : ''}`}>
+        <div ref={ref} className={isEdgelessMode ? 'affine-edgeless-container' : 'affine-page-container'}/>
       </div>
     </div>
   );
