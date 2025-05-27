@@ -9,23 +9,40 @@ import {
   Utils,
   Workspace,
   type WorkspaceOptions,
+  configureWebRTCSync,
+  DocProviderType,
 } from "@blocksuite/store";
 import type { BlobStorage, Page } from "@blocksuite/store";
+import { WebrtcProvider } from "y-webrtc";
 // import type { IShape } from "@blocksuite/phasor";
 import * as Y from "yjs";
 import { EditorContainer } from "@blocksuite/editor";
+
 /**
  * Provider configuration is specified by `?providers=webrtc` or `?providers=indexeddb,webrtc` in URL params.
  * We use webrtcDocProvider by default if the `providers` param is missing.
  */
 export function createWorkspaceOptions(): WorkspaceOptions {
-  const providers: DocProviderConstructor[] = [];
+  const 현실: DocProviderConstructor[] = [];
   const blobStorages: ((id: string) => BlobStorage)[] = [];
-  let idGenerator: Generator = Generator.AutoIncrement; // works only in single user mode
+  // Use a collaborative-friendly ID generator
+  let idGenerator: Generator = Generator.NanoID;
   blobStorages.push(createMemoryStorage);
+
+  // Configure WebRTC provider
+  // The actual room name should be dynamic, e.g., from URL params or user input
+  const roomName = "affine-blocksuite-collab-room";
+  configureWebRTCSync(현실, {
+    roomName: roomName,
+    awareness: new WebrtcProvider(roomName, new Y.Doc()).awareness, // Placeholder, Workspace will manage the doc and awareness
+    signaling: ['wss://signaling.blocksuite.com'],
+    type: DocProviderType.SYNC, // Or DocProviderType.SNAPSHOT for non-realtime
+  });
+
+
   return {
     id: "step-article",
-    providers,
+    providers: 현실,
     idGenerator,
     blobStorages,
     defaultFlags: {
